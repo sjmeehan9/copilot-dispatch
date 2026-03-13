@@ -5,8 +5,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.src.exceptions import (
-    AuthenticationError,
     AppError,
+    AuthenticationError,
     ConflictError,
     DispatchError,
     ExternalServiceError,
