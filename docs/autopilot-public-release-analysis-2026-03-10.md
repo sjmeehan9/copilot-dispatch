@@ -550,7 +550,7 @@ AWS_PROFILE=copilot-dispatch cdk deploy \
 ```bash
 # Use the smoke test script pointed at the new deployment
 python scripts/smoke_test.py \
-  --url https://<new-apprunner-url> \
+  --api-url https://<new-apprunner-url> \
   --api-key <new-api-key> \
   --repository sjmeehan9/autopilot-test-target
 ```
@@ -587,6 +587,17 @@ git push origin main
 - [ ] **Phase 7:** Committed and pushed to public repo
 - [ ] **Post-push:** CI workflow runs green on the public repo
 - [ ] **Post-push:** Verify Actions tab shows only the CI run (no historical agent-executor runs)
+
+### Execution Status (14 March 2026)
+
+- [x] **Phase 3.3:** CDK bootstrap completed for profile `copilot-dispatch` (`python -m infra.app` app entrypoint).
+- [x] **Phase 3.4:** Resource coexistence check completed (`autopilot` and `copilot-dispatch` stacks verified in CloudFormation context).
+- [x] **Phase 4:** Environment setup and unit test validation completed; local `/health` endpoint confirmed healthy.
+- [x] **Phase 5:** GitHub repo/environment secrets configured, including `PAT`, AWS deploy secrets, `SERVICE_URL`, `APPRUNNER_SERVICE_ARN`, and `copilot` environment secrets (`OPENAI_API_KEY`, `PAT`, `WEBHOOK_SECRET`).
+- [x] **Phase 6:** Base and full CDK deployments completed, image pushed to ECR (`linux/amd64`), AppRunner service is `RUNNING`, and production smoke test passed (`5/5`).
+- [x] **Phase 7:** Initial release committed and pushed to `origin/main` with fresh public history.
+- [x] **Post-push CI:** Latest CI run completed successfully on `main`.
+- [ ] **Post-push Actions visibility note:** Actions currently include `CI`, `Deploy`, and `Agent Executor` runs (not CI-only).
 
 ---
 
