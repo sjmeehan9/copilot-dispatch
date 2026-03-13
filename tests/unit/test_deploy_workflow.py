@@ -48,15 +48,15 @@ class TestDeployWorkflowStructure:
         assert True in workflow or "on" in workflow
         assert "jobs" in workflow
 
-    def test_deploy_triggers_only_on_main(self, workflow: dict[str, Any]) -> None:
-        """The deploy workflow triggers only on pushes to the main branch."""
+    def test_deploy_triggers_manual_only(self, workflow: dict[str, Any]) -> None:
+        """The deploy workflow is manual-only via workflow_dispatch."""
         # PyYAML parses the YAML key 'on' as boolean True
         trigger = workflow.get("on") or workflow.get(True)
         assert trigger is not None, "Workflow must have an 'on' trigger block"
-        assert "push" in trigger, "Workflow must trigger on push events"
-        branches = trigger["push"]["branches"]
-        assert branches == ["main"], f"Expected branches ['main'], got {branches}"
-        # Must NOT trigger on pull_request
+        assert (
+            "workflow_dispatch" in trigger
+        ), "Workflow must support manual workflow_dispatch"
+        assert "push" not in trigger, "Workflow must not auto-trigger on push events"
         assert (
             "pull_request" not in trigger
         ), "Deploy workflow must not trigger on pull_request events"

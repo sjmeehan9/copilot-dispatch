@@ -42,51 +42,159 @@ Caller ─── POST /agent/run ──▶ API Service (FastAPI on AppRunner)
 
 - **Python 3.13+** — `python3 --version`
 - **Docker Desktop** — for DynamoDB Local and container builds
-- **AWS CLI v2** — configured with the `copilot-dispatch` profile
+- **AWS CLI v2** — configured with an AWS profile
 - **GitHub CLI** — authenticated with a Copilot-enabled account (`gh auth login`)
-- **Node.js 22+** — required for CDK CLI
-- **AWS CDK CLI** — `npm install -g aws-cdk`
-- **AWS account** — with CDK bootstrapped in `ap-southeast-2`
+- **Node.js 22+** — required for CDK CLI (cloud deployment only)
+- **AWS CDK CLI** — `npm install -g aws-cdk` (cloud deployment only)
 - **GitHub account** — with an active Copilot subscription for the PAT owner
 
 ---
 
-## Quickstart
+## Getting Started — Local Development
+
+### 1. Clone and install
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/sjmeehan9/copilot-dispatch.git
 cd copilot-dispatch
 
-# 2. Create and activate a Python virtual environment
 python3.13 -m venv .venv
 source .venv/bin/activate
-
-# 3. Install in editable mode (includes dev dependencies)
 pip install -e ".[dev]"
+```
 
-# 4. Configure your local environment
+### 2. Configure environment variables
+
+```bash
 cp .env/.env.example .env/.env.local
-# Edit .env/.env.local — fill in your AWS credentials, GitHub PAT, and API key
+```
 
-# 5. Load environment variables
-set -o allexport; source .env/.env.local; set +o allexport
+Edit `.env/.env.local` and fill in:
 
-# 6. Start the local development stack (DynamoDB Local + FastAPI)
+| Variable | Description |
+|----------|-------------|
+| `DISPATCH_API_KEY` | Secret key for authenticating API requests (generate with `python -c "import secrets; print(secrets.token_hex(32))"`) |
+| `DISPATCH_WEBHOOK_SECRET` | HMAC secret for signing webhook payloads (generate the same way) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS credentials (only needed for cloud DynamoDB; local uses DynamoDB Local) |
+| `GITHUB_PAT` | GitHub classic PAT with `repo` scope from a Copilot-enabled user |
+| `GITHUB_OWNER` | GitHub org or user that owns this repo |
+| `GITHUB_REPO` | Repository name (default: `copilot-dispatch`) |
+| `DYNAMODB_ENDPOINT_URL` | Set to `http://localhost:8100` for local dev (already set in the example) |
+
+### 3. Start the local stack
+
+```bash
 bash scripts/dev.sh
+```
 
-# 7. Verify the API is running
+This starts DynamoDB Local via Docker Compose, creates the `dispatch-runs` table, and launches the FastAPI dev server with hot-reload on port 8000.
+
+### 4. Verify
+
+```bash
 curl http://localhost:8000/health
 # {"status": "healthy"}
 ```
+
+The API also serves auto-generated OpenAPI/Swagger documentation at `http://localhost:8000/docs`.
+
+---
+
+## Getting Started — Cloud Deployment (AWS)
+
+Copilot Dispatch is designed to run on **AWS AppRunner** with **DynamoDB** for state storage and **ECR** for container images. The infrastructure is defined as code in `infra/stacks/copilot_dispatch_stack.py` using CDK (Python).
+
+### 1. Bootstrap AWS CDK
+
+```bash
+npm install -g aws-cdk
+cdk bootstrap aws://<ACCOUNT_ID>/ap-southeast-2 --profile <your-profile>
+```
+
+### 2. Create AWS Secrets Manager secrets
+
+The application reads secrets at runtime from Secrets Manager. Create these before deploying:
+
+```bash
+aws secretsmanager create-secret --name dispatch/api-key --secret-string "<your-api-key>" --profile <your-profile>
+aws secretsmanager create-secret --name dispatch/github-pat --secret-string "<your-pat>" --profile <your-profile>
+aws secretsmanager create-secret --name dispatch/webhook-secret --secret-string "<your-secret>" --profile <your-profile>
+```
+
+### 3. Create the ECR repository
+
+```bash
+aws ecr create-repository --repository-name copilot-dispatch --region ap-southeast-2 --profile <your-profile>
+```
+
+### 4. Build and push the Docker image
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --profile <your-profile> --query Account --output text)
+ECR_URI="${ACCOUNT_ID}.dkr.ecr.ap-southeast-2.amazonaws.com/copilot-dispatch"
+
+aws ecr get-login-password --region ap-southeast-2 --profile <your-profile> | \
+    docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.ap-southeast-2.amazonaws.com"
+
+docker build -t copilot-dispatch:latest .
+docker tag copilot-dispatch:latest "${ECR_URI}:latest"
+docker push "${ECR_URI}:latest"
+```
+
+> **Apple Silicon note:** The Dockerfile pins `--platform=linux/amd64` for AppRunner compatibility. See the [Docker guide](docs/docker-guide.md) for details.
+
+### 5. Deploy the CDK stack
+
+```bash
+pip install -r infra/requirements.txt
+cdk deploy --app "python infra/app.py" --require-approval never
+```
+
+### 6. Configure GitHub repository secrets
+
+The CI/CD and agent-executor workflows require these repository secrets:
+
+| Secret | Description |
+|--------|-------------|
+| `AWS_ACCOUNT_ID` | Your AWS account ID |
+| `AWS_REGION` | AWS region (e.g. `ap-southeast-2`) |
+| `AWS_ACCESS_KEY_ID` | IAM access key for CI/CD |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key for CI/CD |
+| `APPRUNNER_SERVICE_ARN` | ARN of the deployed AppRunner service |
+| `SERVICE_URL` | Public URL of the AppRunner service |
+
+The agent-executor workflow also uses a `copilot` GitHub Actions **environment** with:
+
+| Secret | Description |
+|--------|-------------|
+| `PAT` | GitHub PAT with `repo` scope (named `PAT`, not `GITHUB_PAT`, because GitHub reserves the `GITHUB_` prefix) |
+| `ANTHROPIC_API_KEY` | *(Optional)* Anthropic BYOK key for Claude models |
+| `OPENAI_API_KEY` | *(Optional)* OpenAI BYOK key for GPT models |
+
+### 7. Re-enable the deploy workflow
+
+The deploy workflow (`.github/workflows/deploy.yml`) is currently set to **`workflow_dispatch` only** (manual trigger) for public-repo safety. To restore automatic deployments on merge to `main`, update the trigger in `deploy.yml`:
+
+```yaml
+# Replace:
+on:
+  workflow_dispatch:
+
+# With:
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+```
+
+> **Important:** Do not re-enable automatic deployments until you have configured all repository secrets listed above. The pipeline will fail without them.
 
 ---
 
 ## API Usage
 
-All endpoints require the `X-API-Key` header. The production API is served
-over HTTPS via AppRunner. Replace `<url>` with `http://localhost:8000` for
-local development or the AppRunner service URL for production.
+All endpoints require the `X-API-Key` header. Replace `<url>` with `http://localhost:8000` for local development or your AppRunner service URL for production.
 
 ### Implement — create a branch and PR
 
@@ -162,28 +270,6 @@ format, and error codes.
 
 ---
 
-## Deployment
-
-The CI/CD pipeline (`.github/workflows/deploy.yml`) automatically builds,
-tests, pushes to ECR, and deploys via CDK on every merge to `main`.
-
-For first-time setup or manual deployment, see the
-[Deployment section](app/docs/runbook.md#deployment) in the agent runbook.
-
-### Infrastructure
-
-The AWS stack is defined in `infra/stacks/copilot_dispatch_stack.py` using CDK (Python):
-
-| Resource | Configuration |
-|----------|--------------|
-| **AppRunner** | 1 vCPU, 2 GB RAM, scale-to-zero (min 0, max 1), HTTPS, health check on `/health` |
-| **DynamoDB** | `dispatch-runs` table, on-demand billing, TTL enabled, point-in-time recovery |
-| **ECR** | `copilot-dispatch` repository, image scan on push, lifecycle rules |
-| **Secrets Manager** | `dispatch/api-key`, `dispatch/github-pat`, `dispatch/webhook-secret` (pre-existing) |
-| **IAM** | Instance role for DynamoDB + Secrets Manager access; ECR access role for AppRunner |
-
----
-
 ## Development
 
 ### Daily workflow
@@ -225,15 +311,8 @@ pip install -e ".[dev]"
 
 | Document | Description |
 |----------|-------------|
-| [app/docs/runbook.md](app/docs/runbook.md) | Operational runbook — local dev, API usage, agent execution, deployment, troubleshooting, secret rotation |
-| [docs/brief.md](docs/brief.md) | Project brief — problem statement, goals, requirements, constraints |
-| [docs/solution-design.md](docs/solution-design.md) | Technical solution design — architecture, data model, API contracts |
-| [docs/phase-plan.md](docs/phase-plan.md) | Phase delivery plan — 5 phases, 28 components |
-| [docs/phase-summary.md](docs/phase-summary.md) | Completed phase summaries with key decisions and outcomes |
-| [docs/docker-guide.md](docs/docker-guide.md) | Docker user guide — build, run, push workflows |
-
-The API also serves auto-generated OpenAPI/Swagger documentation at `/docs`
-on both local and production deployments.
+| [app/docs/runbook.md](app/docs/runbook.md) | Operational runbook — local dev, API usage, agent execution, deployment, troubleshooting |
+| [docs/docker-guide.md](docs/docker-guide.md) | Docker user guide — build, run, push, debugging |
 
 ---
 

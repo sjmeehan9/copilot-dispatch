@@ -1,10 +1,17 @@
 # Deploy Pipeline
 #
-# Triggered on push to main (merged PRs) or manual dispatch. Runs the full
-# test suite, builds the Docker image, pushes to ECR with SHA + latest tags,
-# then deploys the CDK stack. The test job duplicates CI checks intentionally
-# — this ensures no untested code reaches production even if CI was bypassed
-# (direct push, force merge).
+# Temporarily manual-only for public-repo hardening while deployment
+# infrastructure and repository secrets are being removed/rotated.
+#
+# To re-enable automatic deployments on merge to main, restore:
+# on:
+#   push:
+#     branches:
+#       - main
+#   workflow_dispatch:
+#
+# The pipeline runs the full test suite, builds the Docker image, pushes to
+# ECR with SHA + latest tags, then deploys the CDK stack.
 #
 # Job chain: test → build-and-push → deploy
 #
@@ -14,9 +21,6 @@
 name: Deploy
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 concurrency:
