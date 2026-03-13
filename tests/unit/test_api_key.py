@@ -40,9 +40,7 @@ def test_secrets_provider_local_missing_env(monkeypatch, secrets_provider):
     """Test SecretsProvider raises error if env var is missing in local mode."""
     monkeypatch.delenv("DISPATCH_API_KEY", raising=False)
     with pytest.raises(AuthenticationError, match="Missing environment variable"):
-        secrets_provider.get_secret(
-            "dispatch/api-key", env_fallback="DISPATCH_API_KEY"
-        )
+        secrets_provider.get_secret("dispatch/api-key", env_fallback="DISPATCH_API_KEY")
 
 
 def test_secrets_provider_production_cache(
