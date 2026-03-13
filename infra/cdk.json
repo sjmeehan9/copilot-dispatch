@@ -1,0 +1,15 @@
+{
+  "app": "python app.py",
+  "context": {
+    "aws_region": "ap-southeast-2",
+    "stack_name": "copilot-dispatch",
+    "dynamodb_table_name": "dispatch-runs",
+    "ecr_repository_name": "copilot-dispatch",
+    "github_owner": "sjmeehan9",
+    "github_repo": "copilot-dispatch",
+    "apprunner_cpu": "1024",
+    "apprunner_memory": "2048",
+    "apprunner_min_size": "1",
+    "apprunner_max_size": "1"
+  }
+}

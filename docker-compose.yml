@@ -1,0 +1,15 @@
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    command: "-jar DynamoDBLocal.jar -sharedDb -port 8000"
+    ports:
+      - "8100:8000"
+    volumes:
+      - "./data/dynamodb:/home/dynamodblocal/data"
+    healthcheck:
+      # DynamoDB Local returns HTTP 400 on the root path when healthy.
+      test: ["CMD-SHELL", "curl -sS http://localhost:8000 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped

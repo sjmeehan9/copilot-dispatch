@@ -1,0 +1,8 @@
+# AWS CDK Python dependencies for the Copilot Dispatch infrastructure stack.
+# Install separately from application dependencies:
+#   pip install -r infra/requirements.txt
+#
+# The upper bound on aws-cdk-lib must be compatible with the installed CDK CLI.
+# Run `cdk --version` and consult the CDK compatibility matrix if upgrading.
+aws-cdk-lib>=2.170.0,<2.180.0
+constructs>=10.0.0

@@ -1,0 +1,105 @@
+# Copilot Dispatch application settings
+# All values here are defaults. Override any setting at runtime by setting the
+# corresponding environment variable: DISPATCH_<UPPER_SNAKE_CASE_KEY>.
+# Example: DISPATCH_LOG_LEVEL=DEBUG overrides the log_level key below.
+
+# ---------------------------------------------------------------------------
+# Runtime environment
+# ---------------------------------------------------------------------------
+
+# Deployment environment: "local" for developer workstations, "production" for
+# deployed instances. Controls behaviour such as DynamoDB endpoint selection.
+app_env: "local"
+
+# Python logging level applied globally to the application logger.
+# Valid values: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level: "INFO"
+
+# ---------------------------------------------------------------------------
+# API server settings (uvicorn)
+# ---------------------------------------------------------------------------
+
+# Network interface the uvicorn server binds to. "0.0.0.0" binds all interfaces.
+api_host: "0.0.0.0"
+
+# TCP port the uvicorn server listens on.
+api_port: 8000
+
+# ---------------------------------------------------------------------------
+# Agent (Copilot SDK) settings
+# ---------------------------------------------------------------------------
+
+# Default Claude model identifier passed to the Copilot SDK session.
+# Overridable per-request by the caller.
+default_model: "claude-sonnet-4-20250514"
+
+# Maximum time in minutes an agent session is allowed to run before being
+# forcibly terminated. This is the default applied when a request does not
+# specify a timeout.
+default_timeout_minutes: 30
+
+# Hard upper bound on timeout_minutes accepted from callers. Requests that
+# specify a value greater than this are rejected with HTTP 422.
+max_timeout_minutes: 60
+
+# Default webhook URL to POST results to when a run completes. Set to null
+# (no default) so that each request must explicitly include callback_url or
+# omit it intentionally. Setting a value here enables a fallback for callers
+# that do not supply their own URL.
+default_callback_url: null
+
+# ---------------------------------------------------------------------------
+# DynamoDB settings
+# ---------------------------------------------------------------------------
+
+# Name of the DynamoDB table used to persist run records.
+dynamodb_table_name: "dispatch-runs"
+
+# Custom DynamoDB endpoint URL. Set to "http://localhost:8100" for local
+# development with DynamoDB Local. Leave as null in production to use the
+# standard AWS regional endpoint resolved from the AWS SDK configuration.
+dynamodb_endpoint_url: null
+
+# Number of days after which run records are automatically deleted via DynamoDB
+# TTL. Keeps the table from growing unbounded in production.
+dynamodb_ttl_days: 90
+
+# ---------------------------------------------------------------------------
+# GitHub integration settings
+# ---------------------------------------------------------------------------
+
+# GitHub account or organisation that owns the target repository. Must be set
+# via the DISPATCH_GITHUB_OWNER environment variable in deployed environments;
+# left null here so a missing override is caught at startup rather than
+# producing misleading API errors at runtime.
+github_owner: null
+
+# Name of the GitHub repository where agent workflows are dispatched.
+github_repo: "copilot-dispatch"
+
+# workflow_dispatch target filename inside .github/workflows/ of the target
+# repository. The agent executor workflow that runs Copilot SDK sessions.
+github_workflow_id: "agent-executor.yml"
+
+# ---------------------------------------------------------------------------
+# Service URL (externally reachable base URL)
+# ---------------------------------------------------------------------------
+
+# The externally reachable HTTPS base URL of this API service. Used to
+# construct callback URLs (e.g. api_result_url) that are passed to GitHub
+# Actions workflows. Behind a reverse proxy or TLS-terminating load balancer
+# (such as AWS App Runner), request.base_url may return an incorrect scheme
+# or host. Set this explicitly via DISPATCH_SERVICE_URL in deployed
+# environments to ensure callback URLs are always correct.
+# Example: "https://<hash>.ap-southeast-2.awsapprunner.com"
+service_url: null
+
+# ---------------------------------------------------------------------------
+# Security settings
+# ---------------------------------------------------------------------------
+
+# Controls how the API handles requests that fail security checks.
+# "advisory" — log the issue but allow the request through (useful during
+#               initial rollout and development).
+# "strict"   — reject the request with HTTP 403 if any security check fails.
+security_mode: "advisory"

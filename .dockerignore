@@ -1,0 +1,45 @@
+# Virtual environment
+.venv/
+
+# Version control
+.git/
+.github/
+
+# Caches
+.mypy_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files (may contain secrets)
+.env/
+
+# Tests and documentation
+tests/
+docs/
+
+# Infrastructure (CDK)
+infra/
+cdk.out/
+
+# Local development data
+data/
+
+# Scripts (dev-only)
+scripts/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Docker files (not needed inside the image)
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Misc
+LICENSE
+README.md
+.claude/

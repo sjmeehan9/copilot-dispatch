@@ -1,0 +1,376 @@
+# Agent Executor Workflow
+#
+# Triggered by the API service via workflow_dispatch. Checks out the target
+# repository, auto-detects the runtime environment (Python and/or Node.js),
+# installs dependencies, runs the Copilot SDK agent for the specified role,
+# and reports the result back to the API. A failure handler step guarantees
+# that error information is always reported even if execution steps crash.
+#
+# Inputs are kept within GitHub's 10-input limit by consolidating optional
+# fields (system_instructions, pr_number, skill_paths, callback_url) into
+# a single JSON-encoded "config" input.
+
+name: Agent Executor
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Unique identifier for this agent run"
+        required: true
+        type: string
+      target_repository:
+        description: "Target repository (owner/repo)"
+        required: true
+        type: string
+      target_branch:
+        description: "Base branch to work from"
+        required: true
+        type: string
+      role:
+        description: "Agent role: implement, review, or merge"
+        required: true
+        type: string
+      agent_instructions:
+        description: "Natural language task description"
+        required: true
+        type: string
+      model:
+        description: "LLM model identifier"
+        required: true
+        type: string
+      timeout_minutes:
+        description: "Max execution time in minutes"
+        required: false
+        type: string
+        default: "30"
+      api_result_url:
+        description: "API result ingestion endpoint URL"
+        required: true
+        type: string
+      config:
+        description: "JSON-encoded optional configuration (system_instructions, pr_number, skill_paths, agent_paths, callback_url)"
+        required: false
+        type: string
+        default: "{}"
+
+jobs:
+  execute-agent:
+    name: Execute Agent (${{ inputs.role }})
+    runs-on: ubuntu-latest
+    # Add a 5-minute buffer over the agent timeout for setup and cleanup.
+    # GitHub Actions expressions do not support arithmetic, so we default
+    # to 35 minutes and compute the adjusted value in a setup step.
+    timeout-minutes: 35
+    # The copilot environment provides BYOK API keys for model providers.
+    environment: copilot
+    env:
+      GITHUB_TOKEN: ${{ secrets.PAT }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || '' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
+      TARGET_REPO_PATH: /home/runner/target-repo
+
+    steps:
+      # ---------------------------------------------------------------
+      # Step 0: Compute the effective timeout (agent timeout + 5 min
+      # buffer) and export it for downstream steps.
+      # ---------------------------------------------------------------
+      - name: Compute adjusted timeout
+        id: timeout
+        run: |
+          ADJUSTED=$(( ${{ inputs.timeout_minutes }} + 5 ))
+          echo "adjusted_timeout=${ADJUSTED}" >> "$GITHUB_OUTPUT"
+          echo "Agent timeout: ${{ inputs.timeout_minutes }}m, job timeout: ${ADJUSTED}m"
+
+      # ---------------------------------------------------------------
+      # Step 1: Checkout the orchestration repo (this repo) for the
+      # agent runner script and role modules.
+      # ---------------------------------------------------------------
+      - name: Checkout orchestration repo
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # Step 1b: Parse the config JSON input and set environment
+      # variables for downstream steps.
+      # ---------------------------------------------------------------
+      - name: Parse config input
+        id: parse-config
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, pathlib
+
+          config = json.loads(os.environ.get("CONFIG", "{}"))
+          env_file = os.environ["GITHUB_ENV"]
+
+          si = config.get("system_instructions", "")
+          si_file = "/tmp/system_instructions.txt"
+          if si:
+              pathlib.Path(si_file).write_text(si, encoding="utf-8")
+
+          with open(env_file, "a") as f:
+              f.write(f"HAS_SYSTEM_INSTRUCTIONS={'true' if si else 'false'}\n")
+              f.write(f"PR_NUMBER={config.get('pr_number', '')}\n")
+              f.write(f"SKILL_PATHS={json.dumps(config.get('skill_paths', []))}\n")
+              f.write(f"AGENT_PATHS={json.dumps(config.get('agent_paths', []))}\n")
+              f.write(f"CALLBACK_URL={config.get('callback_url', '')}\n")
+          PYEOF
+
+      # ---------------------------------------------------------------
+      # Step 2: Checkout the target repository at the specified branch.
+      # Full history is required for merge diffs and log commands.
+      # actions/checkout@v4 requires the path to be under GITHUB_WORKSPACE,
+      # so we checkout to a relative path first and then move it to an
+      # isolated location in Step 2b.
+      # ---------------------------------------------------------------
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repository }}
+          ref: ${{ inputs.target_branch }}
+          token: ${{ secrets.PAT }}
+          path: target-repo
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------
+      # Step 2b: Move the target repo to an isolated path outside the
+      # orchestration repo tree. This prevents the Copilot SDK agent
+      # from navigating to parent directories and discovering the
+      # orchestration repo's files (see Component 5.9).
+      # ---------------------------------------------------------------
+      - name: Isolate target repository
+        run: mv "${{ github.workspace }}/target-repo" "${{ env.TARGET_REPO_PATH }}"
+
+      # ---------------------------------------------------------------
+      # Step 3: Setup Python 3.13. Always installed because the agent
+      # runner is written in Python.
+      # ---------------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # ---------------------------------------------------------------
+      # Step 4: Detect and setup Node.js if the target repo uses it.
+      # Reads the engines field from package.json or defaults to 22.
+      # ---------------------------------------------------------------
+      - name: Detect Node.js requirement
+        id: detect-node
+        run: |
+          if [ -f "${{ env.TARGET_REPO_PATH }}/package.json" ]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            # Try to read node version from engines field; default to 22.
+            NODE_VERSION=$(python3 -c "
+          import json, re, sys
+          try:
+              pkg = json.load(open('${{ env.TARGET_REPO_PATH }}/package.json'))
+              engines = pkg.get('engines', {}).get('node', '22')
+              # Extract major version from semver range (e.g., '>=18' -> '18').
+              match = re.search(r'(\d+)', engines)
+              print(match.group(1) if match else '22')
+          except Exception:
+              print('22')
+          ")
+            echo "version=${NODE_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        if: steps.detect-node.outputs.needed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.detect-node.outputs.version }}
+
+      # ---------------------------------------------------------------
+      # Step 5: Install the Copilot CLI binary. The SDK communicates
+      # with the CLI in server mode via JSON-RPC.
+      # ---------------------------------------------------------------
+      - name: Install Copilot CLI
+        run: |
+          # Install the GitHub Copilot CLI extension via gh.
+          gh extension install github/gh-copilot || true
+          # Verify the CLI is available.
+          gh copilot version || echo "Warning: Copilot CLI version check failed"
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+
+      # ---------------------------------------------------------------
+      # Step 5b: Install the copilot-dispatch package (agent runner and all
+      # dependencies including github-copilot-sdk).
+      # ---------------------------------------------------------------
+      - name: Install agent runner dependencies
+        run: pip install -e .
+
+      # ---------------------------------------------------------------
+      # Step 6: Install target repo Python dependencies if present.
+      # ---------------------------------------------------------------
+      - name: Install target repo Python dependencies
+        run: |
+          # Ensure setuptools and wheel are available (Python 3.12+ omits them by default)
+          pip install setuptools wheel
+          
+          if [ -f "${{ env.TARGET_REPO_PATH }}/requirements.txt" ]; then
+            echo "Installing requirements.txt..."
+            pip install -r "${{ env.TARGET_REPO_PATH }}/requirements.txt"
+          fi
+          if [ -f "${{ env.TARGET_REPO_PATH }}/pyproject.toml" ]; then
+            INSTALLABLE=$(python -c "import pathlib,tomllib; p=pathlib.Path('${{ env.TARGET_REPO_PATH }}/pyproject.toml'); d=tomllib.loads(p.read_text(encoding='utf-8')); print('yes' if 'project' in d or 'build-system' in d else 'no')")
+            BUILD_BACKEND=$(python -c "import pathlib,tomllib; p=pathlib.Path('${{ env.TARGET_REPO_PATH }}/pyproject.toml'); d=tomllib.loads(p.read_text(encoding='utf-8')); print(d.get('build-system', {}).get('build-backend', ''))")
+            if [ "$INSTALLABLE" = "yes" ]; then
+              if [ "$BUILD_BACKEND" = "setuptools.backends.legacy:build" ]; then
+                echo "Skipping editable install: target-repo declares unsupported legacy setuptools backend '$BUILD_BACKEND'."
+              else
+                echo "Installing target-repo as editable package..."
+                pip install -e "${{ env.TARGET_REPO_PATH }}/" || echo "Warning: target-repo editable install failed"
+              fi
+            else
+              echo "pyproject.toml exists but does not define a build-system or project. Skipping editable install."
+            fi
+          fi
+
+      # ---------------------------------------------------------------
+      # Step 7: Install target repo Node.js dependencies if present.
+      # ---------------------------------------------------------------
+      - name: Install target repo Node.js dependencies
+        if: steps.detect-node.outputs.needed == 'true'
+        run: |
+          cd "${{ env.TARGET_REPO_PATH }}"
+          npm ci
+
+      # ---------------------------------------------------------------
+      # Step 8: gh CLI authentication.
+      # The GITHUB_TOKEN env var (set at job level from secrets.PAT)
+      # is automatically picked up by gh — no explicit login needed.
+      # ---------------------------------------------------------------
+
+      # ---------------------------------------------------------------
+      # Step 9: Cache pip and npm dependencies for faster repeated runs.
+      # ---------------------------------------------------------------
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Cache npm packages
+        if: steps.detect-node.outputs.needed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      # ---------------------------------------------------------------
+      # Step 10: Report "running" status to the API immediately so the
+      # stale run detection window starts from workflow execution, not
+      # from dispatch time.
+      # ---------------------------------------------------------------
+      - name: Report running status
+        run: |
+          python -c "
+          import asyncio
+          from app.src.agent.result import ApiPoster
+
+          async def report_status():
+              poster = ApiPoster('${{ inputs.api_result_url }}', '${{ secrets.WEBHOOK_SECRET }}')
+              try:
+                  await poster.post_status_update('${{ inputs.run_id }}')
+              finally:
+                  await poster.close()
+
+          asyncio.run(report_status())
+          "
+
+      # ---------------------------------------------------------------
+      # Step 11: Execute the agent runner with all inputs passed as CLI
+      # arguments. Optional arguments are included only when the
+      # corresponding config values are non-empty.
+      # ---------------------------------------------------------------
+      - name: Execute agent runner
+        id: agent-execution
+        run: |
+          python -m app.src.agent.runner \
+            --run-id "${{ inputs.run_id }}" \
+            --role "${{ inputs.role }}" \
+            --model "${{ inputs.model }}" \
+            --instructions "${{ inputs.agent_instructions }}" \
+            --repo-path "${{ env.TARGET_REPO_PATH }}" \
+            --timeout "${{ inputs.timeout_minutes }}" \
+            --api-result-url "${{ inputs.api_result_url }}" \
+            --webhook-secret "${{ secrets.WEBHOOK_SECRET }}" \
+            --branch "${{ inputs.target_branch }}" \
+            --repository "${{ inputs.target_repository }}" \
+            ${{ env.HAS_SYSTEM_INSTRUCTIONS == 'true' && '--system-instructions @/tmp/system_instructions.txt' || '' }} \
+            ${{ env.PR_NUMBER && format('--pr-number "{0}"', env.PR_NUMBER) || '' }} \
+            ${{ env.SKILL_PATHS != '[]' && format('--skill-paths "{0}"', env.SKILL_PATHS) || '' }} \
+            ${{ env.AGENT_PATHS != '[]' && format('--agent-paths "{0}"', env.AGENT_PATHS) || '' }}
+
+      # ---------------------------------------------------------------
+      # Step 12: Failure handler — always runs if any step fails or the
+      # workflow is cancelled. POSTs an error payload to the API result
+      # endpoint so the caller always receives a status update.
+      # ---------------------------------------------------------------
+      - name: Report failure to API
+        if: failure() || cancelled()
+        run: |
+          python3 << 'PYEOF'
+          """Stdlib-only failure reporter.
+
+          This step may run when pip install has not yet executed (e.g. the
+          checkout step failed), so it must NOT import any third-party
+          packages. Uses only the standard library.
+          """
+          import hashlib, hmac, json, time
+          from urllib.request import Request, urlopen
+
+          run_id = '${{ inputs.run_id }}'
+          role = '${{ inputs.role }}'
+          model = '${{ inputs.model }}'
+          api_url = '${{ inputs.api_result_url }}'
+          secret = '${{ secrets.WEBHOOK_SECRET }}'
+
+          if '${{ job.status }}' == 'cancelled':
+              error_code = 'WORKFLOW_CANCELLED'
+              error_message = 'Workflow was cancelled.'
+          else:
+              error_code = 'WORKFLOW_STEP_FAILURE'
+              error_message = 'Agent executor workflow step failed. Check the workflow logs for details.'
+
+          payload = {
+              'run_id': run_id,
+              'status': 'failure',
+              'result': None,
+              'error': {
+                  'error_code': error_code,
+                  'error_message': error_message,
+                  'error_details': {
+                      'agent_log_url': '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+                      'job_status': '${{ job.status }}'
+                  },
+              },
+              'model_used': model,
+              'role': role,
+              'duration_seconds': None,
+          }
+
+          body = json.dumps(payload).encode('utf-8')
+          timestamp = str(int(time.time()))
+          sig_payload = f'{timestamp}.'.encode('utf-8') + body
+          signature = hmac.new(secret.encode('utf-8'), sig_payload, hashlib.sha256).hexdigest()
+
+          req = Request(api_url, data=body, method='POST')
+          req.add_header('Content-Type', 'application/json')
+          req.add_header('X-Webhook-Timestamp', timestamp)
+          req.add_header('X-Webhook-Signature', signature)
+
+          try:
+              resp = urlopen(req, timeout=30)
+              print(f'Failure reported successfully: HTTP {resp.status}')
+          except Exception as exc:
+              print(f'Warning: failed to report error to API: {exc}')
+          PYEOF

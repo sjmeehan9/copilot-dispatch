@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copilot-dispatch"
+version = "0.1.0"
+description = "Copilot Dispatch — Copilot agent API service that dispatches GitHub Actions workflows and delivers results via webhook"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Copilot Dispatch Contributors" }]
+
+dependencies = [
+    # Web framework and ASGI server
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    # Data validation and settings management
+    "pydantic>=2.0",
+    # AWS SDK — DynamoDB, Secrets Manager, AppRunner
+    "boto3>=1.35.0",
+    # Async HTTP client — GitHub API calls, webhook delivery
+    "httpx>=0.28.0",
+    # YAML config loading
+    "pyyaml>=6.0",
+    # Copilot SDK — agent session lifecycle management (Phase 4)
+    "github-copilot-sdk>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.25.0",
+    # Code formatting and import sorting
+    "black>=24.0",
+    "isort>=5.13",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "infra*", "tests*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py313"]
+
+[tool.isort]
+profile = "black"
+known_first_party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "requires_e2e: marks tests as end-to-end tests requiring live external infrastructure (deselect with '--e2e-confirm' absent)",
+]

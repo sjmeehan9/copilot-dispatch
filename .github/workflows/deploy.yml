@@ -1,0 +1,178 @@
+# Deploy Pipeline
+#
+# Triggered on push to main (merged PRs) or manual dispatch. Runs the full
+# test suite, builds the Docker image, pushes to ECR with SHA + latest tags,
+# then deploys the CDK stack. The test job duplicates CI checks intentionally
+# — this ensures no untested code reaches production even if CI was bypassed
+# (direct push, force merge).
+#
+# Job chain: test → build-and-push → deploy
+#
+# The deploy job uses the "production" GitHub Actions environment, enabling
+# optional protection rules (approval gates, wait timers) for future use.
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false  # Never cancel an in-progress deployment
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: copilot-dispatch
+
+jobs:
+  # -----------------------------------------------------------------
+  # Phase 1: Test — lint, unit tests, quality-gate evals
+  # -----------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install -r infra/requirements.txt
+
+      - name: Black formatting check
+        run: black --check app/src/ tests/ scripts/
+
+      - name: isort import ordering check
+        run: isort --check-only app/src/ tests/ scripts/
+
+      - name: Run tests with coverage
+        run: pytest -q --cov=app/src --cov-report=term-missing
+
+      - name: Run quality gate evals
+        run: python scripts/evals.py
+
+  # -----------------------------------------------------------------
+  # Phase 2: Build Docker image and push to ECR
+  # -----------------------------------------------------------------
+  build-and-push:
+    name: Build & Push to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image_tag: ${{ steps.meta.outputs.sha_tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          SHA_TAG=$(git rev-parse --short HEAD)
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ecr_uri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: docker build -t copilot-dispatch:${{ steps.meta.outputs.sha_tag }} .
+
+      - name: Tag and push to ECR
+        run: |
+          docker tag copilot-dispatch:${{ steps.meta.outputs.sha_tag }} ${{ steps.meta.outputs.ecr_uri }}:${{ steps.meta.outputs.sha_tag }}
+          docker tag copilot-dispatch:${{ steps.meta.outputs.sha_tag }} ${{ steps.meta.outputs.ecr_uri }}:latest
+          docker push ${{ steps.meta.outputs.ecr_uri }}:${{ steps.meta.outputs.sha_tag }}
+          docker push ${{ steps.meta.outputs.ecr_uri }}:latest
+
+  # -----------------------------------------------------------------
+  # Phase 3: Deploy infrastructure with CDK
+  # -----------------------------------------------------------------
+  deploy:
+    name: CDK Deploy
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: Install CDK Python dependencies
+        run: |
+          pip install -r infra/requirements.txt
+          pip install -e .
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Wait for App Runner service to stabilize
+        run: |
+          # Pushing :latest to ECR triggers App Runner auto-deploy. We must
+          # wait for that operation to complete before CDK attempts its own
+          # update, otherwise CloudFormation gets OPERATION_IN_PROGRESS.
+          SERVICE_ARN="${{ secrets.APPRUNNER_SERVICE_ARN }}"
+          if [ -z "$SERVICE_ARN" ]; then
+            echo "APPRUNNER_SERVICE_ARN secret not set — skipping wait"
+          else
+            echo "Waiting for App Runner service to reach RUNNING state..."
+            for i in $(seq 1 40); do
+              STATUS=$(aws apprunner describe-service \
+                --service-arn "$SERVICE_ARN" \
+                --query 'Service.Status' --output text 2>/dev/null || echo "UNKNOWN")
+              echo "  Attempt $i/40: status=$STATUS"
+              if [ "$STATUS" = "RUNNING" ]; then
+                echo "Service is stable."
+                break
+              fi
+              if [ "$i" -eq 40 ]; then
+                echo "Warning: Timed out waiting for RUNNING state (last: $STATUS). Proceeding anyway."
+              fi
+              sleep 15
+            done
+          fi
+
+      - name: Deploy CDK stack
+        run: |
+          CDK_ARGS="--require-approval never --app \"python infra/app.py\""
+          if [ -n "${{ secrets.SERVICE_URL }}" ]; then
+            CDK_ARGS="$CDK_ARGS -c service_url=${{ secrets.SERVICE_URL }}"
+          fi
+          eval cdk deploy $CDK_ARGS
