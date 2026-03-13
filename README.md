@@ -50,7 +50,7 @@ Caller ─── POST /agent/run ──▶ API Service (FastAPI on AppRunner)
 
 ---
 
-## Getting Started — Local Development
+## Quickstart
 
 ### 1. Clone and install
 
@@ -100,7 +100,7 @@ The API also serves auto-generated OpenAPI/Swagger documentation at `http://loca
 
 ---
 
-## Getting Started — Cloud Deployment (AWS)
+## Deployment
 
 Copilot Dispatch is designed to run on **AWS AppRunner** with **DynamoDB** for state storage and **ECR** for container images. The infrastructure is defined as code in `infra/stacks/copilot_dispatch_stack.py` using CDK (Python).
 
