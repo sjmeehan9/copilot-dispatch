@@ -24,7 +24,7 @@ dependencies = [
     # YAML config loading
     "pyyaml>=6.0",
     # Copilot SDK — agent session lifecycle management (Phase 4)
-    "github-copilot-sdk>=0.1.0",
+    "github-copilot-sdk>=0.1.0,<2",
 ]
 
 [project.optional-dependencies]
